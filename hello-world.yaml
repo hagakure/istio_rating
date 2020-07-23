@@ -1,0 +1,159 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rate-limit
+  labels:
+    istio-injection: enabled
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-world-deployment
+  namespace: rate-limit
+  labels:
+    app: hello-world
+spec:
+  selector:
+    matchLabels:
+      app: hello-world
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: hello-world
+    spec:
+      containers:
+      - name: hello-world
+        image: bhargavshah86/kube-test:v0.1
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            memory: 256Mi
+            cpu: "250m"
+          requests:
+            memory: 128Mi
+            cpu: "80m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-world-svc
+  namespace: rate-limit
+spec:
+  selector:
+    app: hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: hello-world-gateway
+  namespace: rate-limit
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http-web
+        protocol: HTTP
+      hosts:
+        - '*'
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: hello-world-vs
+  namespace: rate-limit
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - hello-world-gateway
+  http:
+    - route:
+       - destination:
+            port:
+              number: 80
+            host: hello-world-svc.rate-limit.svc.cluster.local
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: vs-kiali
+  namespace: rate-limit
+spec:
+  hosts:
+    - "kiali.monitoring.sbms.com"
+  gateways:
+    - hello-world-gateway
+  http:
+    - route:
+        - destination:
+            port:
+              number: 20001
+            host: kiali.istio-system.svc.cluster.local
+---
+apiVersion: "config.istio.io/v1alpha2"
+kind: instance
+metadata:
+  name: requestcount
+  namespace: rate-limit
+spec:
+  compiledTemplate: quota
+  params:
+    dimensions:
+      destination: destination.labels["app"] | destination.service.host | "unknown"
+---
+apiVersion: config.istio.io/v1alpha2
+kind: QuotaSpec
+metadata:
+  name: quota
+  namespace: rate-limit
+spec:
+  rules:
+    - quotas:
+        - quota: requestcount.instance.rate-limit
+          charge: 1
+---
+apiVersion: config.istio.io/v1alpha2
+kind: QuotaSpecBinding
+metadata:
+  name: quota-binding
+  namespace: rate-limit
+spec:
+  quotaSpecs:
+    - name: quota
+      namespace: rate-limit
+  services:
+    - service: '*'
+---
+apiVersion: config.istio.io/v1alpha2
+kind: handler
+metadata:
+  name: quotahandler
+  namespace: rate-limit
+spec:
+  compiledAdapter: redisquota
+  params:
+      redisServerUrl: localhost:6379
+      connectionPoolSize: 10
+      quotas:
+      - name: requestcount.instance.rate-limit
+        maxAmount: 2
+        validDuration: 30s
+---
+apiVersion: config.istio.io/v1alpha2
+kind: rule
+metadata:
+  name: quota-rule
+  namespace: rate-limit
+spec:
+  actions:
+  - handler: quotahandler.handler.rate-limit
+    instances:
+    - requestcount.instance.rate-limit
